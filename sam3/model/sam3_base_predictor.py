@@ -10,6 +10,7 @@ Subclasses only need to override methods where their behavior differs.
 """
 
 import gc
+import inspect
 import time
 import uuid
 from typing import Dict, List, Optional
@@ -133,6 +134,16 @@ class Sam3BasePredictor:
             init_kwargs["async_loading_frames"] = self.async_loading_frames
         if hasattr(self, "video_loader_type"):
             init_kwargs["video_loader_type"] = self.video_loader_type
+        # Different init_state implementations across SAM3 / SAM3.1 / multiplex
+        # accept different kwargs (e.g. the multiplex tracking variant in this
+        # release dropped offload_state_to_cpu). Filter to what the actual
+        # callee declares so we don't crash on a missing keyword.
+        try:
+            accepted = set(inspect.signature(self.model.init_state).parameters)
+        except (TypeError, ValueError):
+            accepted = None
+        if accepted is not None:
+            init_kwargs = {k: v for k, v in init_kwargs.items() if k in accepted}
         inference_state = self.model.init_state(**init_kwargs)
 
         if not session_id:
