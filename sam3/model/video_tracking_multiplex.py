@@ -2742,7 +2742,18 @@ def _append(
         if k1 not in d1:
             return
 
-    d1[k1] = torch.cat([d1[k1], d2[k2]], dim=dim)
+    # PATCH (vision-label-hub 2026-06-23): when offload_state_to_cpu=True,
+    # d1[k1] is on CPU (offloaded prev output) while d2[k2] (just-computed
+    # tensor) is on GPU. torch.cat needs same device. Cat on GPU then move
+    # the result back to d1's original device so the caller's offload
+    # bookkeeping stays consistent.
+    a, b = d1[k1], d2[k2]
+    if a.device != b.device:
+        a_on_gpu = a.to(b.device, non_blocking=True)
+        cat_out = torch.cat([a_on_gpu, b], dim=dim)
+        d1[k1] = cat_out.to(a.device, non_blocking=True)
+    else:
+        d1[k1] = torch.cat([a, b], dim=dim)
 
 
 def _merge(

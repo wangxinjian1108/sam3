@@ -208,6 +208,7 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
         self,
         resource_path,
         offload_video_to_cpu=False,
+        offload_state_to_cpu=False,
         async_loading_frames=False,
         use_torchcodec=False,
         use_cv2=False,
@@ -236,6 +237,16 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
         inference_state["orig_height"] = orig_height
         inference_state["orig_width"] = orig_width
         inference_state["constants"] = {}
+        # PATCH (vision-label-hub 2026-06-23): forward offload_state_to_cpu
+        # through to the inner sam2 tracker. Without this, _init_new_sam2_state
+        # uses tracker.init_state's default (False), so storage_device on the
+        # inner state stays on GPU even when the user requested CPU offload.
+        # Result: output_dict["non_cond_frame_outputs"][N]["maskmem_features"]
+        # accumulates on GPU at ~65 MB/frame, making chunk≥200 OOM despite
+        # the user setting offload_state_to_cpu=True. Stored here so
+        # _init_new_sam2_state and (re)init paths can read it.
+        # See docs/SAM3_MEMORY_DEEPDIVE.md §10.
+        inference_state["offload_state_to_cpu"] = offload_state_to_cpu
         self._construct_initial_input_batch(inference_state, images)
         # initialize extra states
         # sam2_inference_states will contain separate inference_states for each frame having new objects if
@@ -244,6 +255,14 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
         inference_state["sam2_inference_states"] = []
         inference_state["tracker_metadata"] = {}
         inference_state["feature_cache"] = {}
+        # PATCH (vision-label-hub 2026-06-23): stash offload_state_to_cpu on
+        # feature_cache so it propagates to _tracker_add_new_objects (in
+        # sam3_multiplex_base.py), which calls tracker.init_state during
+        # text-prompted propagation. feature_cache is the only dict that's
+        # already plumbed through the relevant call chain.
+        inference_state["feature_cache"]["_offload_state_to_cpu"] = (
+            inference_state.get("offload_state_to_cpu", False)
+        )
         inference_state["cached_frame_outputs"] = {}
         inference_state["is_image_only"] = is_image_type(resource_path)
         return inference_state
@@ -267,6 +286,13 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
         inference_state["sam2_inference_states"].clear()
         inference_state["tracker_metadata"].clear()
         inference_state["feature_cache"].clear()
+        # PATCH (vision-label-hub 2026-06-23): re-plant the offload flag
+        # because reset_state() wiped feature_cache. add_prompt(text=...)
+        # calls reset_state before propagation, so without re-planting here
+        # the flag wouldn't reach _tracker_add_new_objects.
+        inference_state["feature_cache"]["_offload_state_to_cpu"] = (
+            inference_state.get("offload_state_to_cpu", False)
+        )
         inference_state["cached_frame_outputs"] = {}
 
     def _get_processing_order(
@@ -1833,6 +1859,7 @@ class Sam3MultiplexTrackingProd(Sam3MultiplexTracking):
         self,
         resource_path,
         offload_video_to_cpu=False,
+        offload_state_to_cpu=False,
         async_loading_frames=False,
         use_torchcodec=False,
         use_cv2=False,
@@ -1841,6 +1868,7 @@ class Sam3MultiplexTrackingProd(Sam3MultiplexTracking):
         inference_state = super().init_state(
             resource_path=resource_path,
             offload_video_to_cpu=offload_video_to_cpu,
+            offload_state_to_cpu=offload_state_to_cpu,
             async_loading_frames=async_loading_frames,
             use_torchcodec=use_torchcodec,
             use_cv2=use_cv2,
@@ -2214,6 +2242,7 @@ class Sam3MultiplexTrackingWithInteractivity(Sam3MultiplexTracking):
         self,
         resource_path,
         offload_video_to_cpu=False,
+        offload_state_to_cpu=False,
         async_loading_frames=False,
         use_torchcodec=False,
         use_cv2=False,
@@ -2222,6 +2251,7 @@ class Sam3MultiplexTrackingWithInteractivity(Sam3MultiplexTracking):
         inference_state = super().init_state(
             resource_path=resource_path,
             offload_video_to_cpu=offload_video_to_cpu,
+            offload_state_to_cpu=offload_state_to_cpu,
             async_loading_frames=async_loading_frames,
             use_torchcodec=use_torchcodec,
             use_cv2=use_cv2,
@@ -2246,11 +2276,15 @@ class Sam3MultiplexTrackingWithInteractivity(Sam3MultiplexTracking):
             ]
 
     def _init_new_sam2_state(self, inference_state):
+        # PATCH (vision-label-hub 2026-06-23): thread offload_state_to_cpu
+        # through to the inner sam2 tracker so storage_device on the inner
+        # state honours the user request. See docs/SAM3_MEMORY_DEEPDIVE.md §10.
         return self.tracker.init_state(
             cached_features=inference_state["feature_cache"],
             video_height=inference_state["orig_height"],
             video_width=inference_state["orig_width"],
             num_frames=inference_state["num_frames"],
+            offload_state_to_cpu=inference_state.get("offload_state_to_cpu", False),
         )
 
     def cancel_propagation(self, inference_state):
@@ -3340,11 +3374,13 @@ class Sam3MultiplexTrackingWithInteractivity(Sam3MultiplexTracking):
         )
 
         # Step 3: Create a new singleton inference state
+        # PATCH (vision-label-hub 2026-06-23): thread offload_state_to_cpu.
         new_sam2_state = self.tracker.init_state(
             cached_features=inference_state["feature_cache"],
             video_height=inference_state["orig_height"],
             video_width=inference_state["orig_width"],
             num_frames=inference_state["num_frames"],
+            offload_state_to_cpu=inference_state.get("offload_state_to_cpu", False),
         )
 
         # Step 4: Set up the singleton state structure for the extracted object

@@ -1750,11 +1750,14 @@ class Sam3VideoBase(nn.Module):
         # prepare inference_state
         # batch objects that first appear on the same frame together
         # Clear inference state. Keep the cached image features if available.
+        # PATCH (vision-label-hub 2026-06-23): thread offload_state_to_cpu via
+        # feature_cache plumbing channel. See docs/SAM3_MEMORY_DEEPDIVE.md §10.
         new_tracker_state = self.tracker.init_state(
             cached_features=feature_cache,
             video_height=orig_vid_height,
             video_width=orig_vid_width,
             num_frames=num_frames,
+            offload_state_to_cpu=feature_cache.get("_offload_state_to_cpu", False),
         )
         new_tracker_state["backbone_out"] = (
             prev_tracker_state.get("backbone_out", None)

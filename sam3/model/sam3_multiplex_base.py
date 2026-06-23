@@ -2634,11 +2634,18 @@ class Sam3MultiplexBase(Sam3VideoBase):
                 new_sam2_state = best_state
             else:
                 # Need to create a new state
+                # PATCH (vision-label-hub 2026-06-23): read offload_state_to_cpu
+                # from feature_cache (planted by Sam3MultiplexTracking.init_state)
+                # so the inner tracker honours it. Without this, even when the
+                # user sets offload_state_to_cpu=True, the inner state's
+                # storage_device stays cuda and output_dict accumulates on GPU,
+                # OOMing chunk≥200. See docs/SAM3_MEMORY_DEEPDIVE.md §10.
                 new_sam2_state = self.tracker.init_state(
                     cached_features=feature_cache,
                     video_height=orig_vid_height,
                     video_width=orig_vid_width,
                     num_frames=num_frames,
+                    offload_state_to_cpu=feature_cache.get("_offload_state_to_cpu", False),
                 )
                 new_sam2_state["backbone_out"] = (
                     prev_sam2_state.get("backbone_out", None)
@@ -2654,11 +2661,13 @@ class Sam3MultiplexBase(Sam3VideoBase):
                 if prev_sam2_state is not None:
                     new_sam2_state = prev_sam2_state
                 else:
+                    # PATCH (vision-label-hub 2026-06-23): same as above.
                     new_sam2_state = self.tracker.init_state(
                         cached_features=feature_cache,
                         video_height=orig_vid_height,
                         video_width=orig_vid_width,
                         num_frames=num_frames,
+                        offload_state_to_cpu=feature_cache.get("_offload_state_to_cpu", False),
                     )
                     new_sam2_state["backbone_out"] = None
                     tracker_states_local = [new_sam2_state]
@@ -2670,6 +2679,7 @@ class Sam3MultiplexBase(Sam3VideoBase):
                     video_height=orig_vid_height,
                     video_width=orig_vid_width,
                     num_frames=num_frames,
+                    offload_state_to_cpu=feature_cache.get("_offload_state_to_cpu", False),
                 )
                 new_sam2_state["backbone_out"] = (
                     prev_sam2_state.get("backbone_out", None)
