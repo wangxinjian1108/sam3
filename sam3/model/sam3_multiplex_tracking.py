@@ -1262,6 +1262,20 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
                 if obj_id in filtered_obj_id_to_mask:
                     del filtered_obj_id_to_mask[obj_id]
 
+        # PATCH (vision-label-hub 2026-06-23): when offload_state_to_cpu=True,
+        # move the cached masks to CPU. cached_frame_outputs accumulates one
+        # entry per processed frame keyed by frame_idx (no eviction) and each
+        # entry holds {obj_id: video-res bool mask} ≈ 36 MB/frame. Without
+        # this offload, chunk=250 grows ~6.4 GB of GPU just for this cache.
+        # The masks are only consumed in _build_sam2_output / fetch_* which
+        # are CPU-friendly (results go to user code as numpy anyway).
+        # See docs/SAM3_MEMORY_DEEPDIVE.md §10.
+        if inference_state.get("offload_state_to_cpu", False):
+            filtered_obj_id_to_mask = {
+                k: (v.cpu() if hasattr(v, "cpu") else v)
+                for k, v in filtered_obj_id_to_mask.items()
+            }
+
         inference_state["cached_frame_outputs"][frame_idx] = filtered_obj_id_to_mask
 
     def _build_sam2_output(
