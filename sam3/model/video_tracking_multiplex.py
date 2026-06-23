@@ -2769,7 +2769,11 @@ def _merge(
     else:
         if k1 not in d1:
             return
-    d1[k1][d2_idx] = d2[k2].to(dtype=d1[k1].dtype)
+    # PATCH (vision-label-hub 2026-06-23): when offload_state_to_cpu=True,
+    # d1[k1] is on CPU (offloaded prev) while d2[k2] (just-computed) is on
+    # GPU. Need to convert dtype AND device. See docs/SAM3_MEMORY_DEEPDIVE.md §10.
+    src = d2[k2].to(dtype=d1[k1].dtype, device=d1[k1].device, non_blocking=True)
+    d1[k1][d2_idx] = src
 
 
 class VideoTrackingDynamicMultiplex(VideoTrackingMultiplex):
