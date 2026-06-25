@@ -3,6 +3,7 @@ from functools import reduce
 from typing import Dict
 
 import numpy as np
+import os
 import sam3.model.sam3_multiplex_base
 import sam3.model.sam3_video_base
 import torch
@@ -1127,25 +1128,41 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
         )
 
         if needs_buffer_init or needs_buffer_resize:
+            # Allow callers to fall back from pinned (cudaHostAlloc) to pageable
+            # RAM when the CUDA driver host-allocator pool is restricted on the
+            # deployment hardware (we see cudaErrorInvalidValue on A800 + CUDA
+            # 12.8 even though /proc says memlock=unlimited; pinned single-alloc
+            # caps out around 64 MB on that combo). Pageable is the safe default
+            # because the .copy_() lines below this block are blocking anyway
+            # (no non_blocking=True), so the only loss is H2D throughput: ~12
+            # GB/s -> ~2-3 GB/s, which adds < 5% to per-chunk postprocess time
+            # in practice. Set SAM3_USE_PINNED_POSTPROCESS=1 to keep the
+            # upstream-original pinned behaviour (recommended on hardware where
+            # cudaHostAlloc works -- e.g. L4 -- because the buffer is large
+            # enough to benefit from DMA-free GPU->CPU copies).
+            _use_pinned = (
+                os.environ.get("SAM3_USE_PINNED_POSTPROCESS", "").strip()
+                in ("1", "true", "True", "TRUE", "yes")
+            )
             self.buffer_cpu_batched = {
                 "out_obj_ids": torch.zeros(
                     batched_buffer_size,
                     dtype=torch.int64,
                     device="cpu",
-                    pin_memory=True,
+                    pin_memory=_use_pinned,
                 ),
                 "out_probs": torch.zeros(
                     batched_buffer_size,
                     dtype=torch.float32,
                     device="cpu",
-                    pin_memory=True,
+                    pin_memory=_use_pinned,
                 ),
                 "out_boxes_xywh": torch.zeros(
                     batched_buffer_size,
                     4,
                     dtype=torch.float32,
                     device="cpu",
-                    pin_memory=True,
+                    pin_memory=_use_pinned,
                 ),
                 "out_binary_masks": torch.zeros(
                     batched_buffer_size,
@@ -1153,7 +1170,7 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
                     W_video,
                     dtype=bool,
                     device="cpu",
-                    pin_memory=True,
+                    pin_memory=_use_pinned,
                 ),
             }
             if self.running_in_prod:
@@ -1162,7 +1179,7 @@ class Sam3MultiplexTracking(Sam3MultiplexBase):
                     2,
                     dtype=torch.float32,
                     device="cpu",
-                    pin_memory=True,
+                    pin_memory=_use_pinned,
                 )
 
         self.buffer_cpu_batched["out_obj_ids"][:total_objects].copy_(final_obj_ids)
